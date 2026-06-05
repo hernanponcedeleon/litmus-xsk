@@ -1,0 +1,64 @@
+C spsc-rb+p0acqrelnewp1barrier+full
+
+// Simple one entry ring:
+// prod_head prod cons       allowed action       prod_head prod cons
+//    	   0    0    0  =>     allow prod      =>   	  1    0	0
+//         0    0	 1  =>       cons          =>   	  0    0	0
+//         0    1    0  =>     impossible      =>   	  -    -	-
+//         0    1    1  =>       prod          =>   	  0	   0	1
+//    	   1    0    0  =>     	 prod      	   =>   	  1    1	0
+//         1    0	 1  =>     impossible      =>   	  -    -	-
+//         1    1    0  =>       cons          =>   	  1    1	1
+//         1    1    1  =>     allow prod      =>   	  0	   1	1
+
+// New acqrel in kernel and the barrier algorithm in userspace, full ring:
+// Here we start at prod_head==1, prod==1, cons==0, data0==0, 
+// i.e. producer has written 0, so from here only the consumer 
+// can start, and should consume 0. Afterwards, producer can continue 
+// and write 1 to data0. Can we enter state prod==0, cons==1, but 
+// consumer observerd the write of 1? Also can we enter the impossible states?
+
+{
+	int prod_head = 1;
+	int prod = 1;
+}
+
+P0(int *prod_head, int *prod, int *cons, int *data0)
+{
+	int capacity = 1;
+	int r_cmp;
+	int ph;
+	int c;
+
+	ph = smp_load_acquire(prod_head);
+
+	c = READ_ONCE(*cons);
+	if ((ph - c) < capacity) {
+		r_cmp = cmpxchg(prod_head, ph, ph ^ 1);
+		if (r_cmp == ph) {
+			WRITE_ONCE(*data0, 1);
+		
+			if (READ_ONCE(*prod) == ph) {
+				smp_store_release(prod, ph ^ 1);
+			}
+		}
+	}
+}
+
+P1(int *prod, int *cons, int *data0)
+{
+	int d = -1;
+	int c;
+
+	c = READ_ONCE(*cons);
+	if (READ_ONCE(*prod) != c) {
+		smp_rmb();
+		d = READ_ONCE(*data0);
+		smp_mb();
+		WRITE_ONCE(*cons, c ^ 1);
+	}
+}
+
+exists(
+    (1:d=1 /\ prod_head=0 /\ prod=0 /\ cons=1 )
+);

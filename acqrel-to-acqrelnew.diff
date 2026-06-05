@@ -1,0 +1,170 @@
+diff --git a/net/xdp/xsk_queue.h b/net/xdp/xsk_queue.h
+index 3e3fbb73d23e..4efc60e1f123 100644
+--- a/net/xdp/xsk_queue.h
++++ b/net/xdp/xsk_queue.h
+@@ -23,6 +23,10 @@ struct xdp_ring {
+ 	u32 pad2 ____cacheline_aligned_in_smp;
+ 	u32 flags;
+ 	u32 pad3 ____cacheline_aligned_in_smp;
++	u32 producer_head ____cacheline_aligned_in_smp;
++	u32 pad4 ____cacheline_aligned_in_smp;
++	u32 consumer_head ____cacheline_aligned_in_smp;
++	u32 pad5 ____cacheline_aligned_in_smp;
+ };
+ 
+ /* Used for the RX and TX queues for packets */
+@@ -502,6 +506,157 @@ static inline u64 xskq_nb_queue_empty_descs(struct xsk_queue *q)
+ 	return q ? q->queue_empty_descs : 0;
+ }
+ 
++/* Functions for SPMC or MPSC operations */
++
++static inline u32 xskq_move_prod_head(struct xsk_queue *q, u32 n, u32 *old_head,
++				      u32 *new_head)
++{
++	const u32 capacity = q->nentries;
++	u32 free_entries, max = n;
++	int success;
++
++	struct xdp_ring *ring = (struct xdp_ring *)q->ring;
++
++	do {
++		n = max;
++
++		*old_head = smp_load_acquire(&ring->producer_head);
++		
++		/* The subtraction is done between two unsigned 32bits value.
++		 * So 'free_entries' is always between and capacity (which is < size).
++		 */
++		free_entries = (capacity + READ_ONCE(ring->consumer) - *old_head);
++		if (unlikely(n > free_entries))
++			n = free_entries;
++
++		if (n == 0)
++			return 0;
++
++		*new_head = *old_head + n;
++		success = (cmpxchg(&ring->producer_head, *old_head, *new_head) == *old_head);
++	} while (unlikely(success == 0));
++
++	return n;
++}
++
++static inline u32 xskq_move_cons_head(struct xsk_queue *q, u32 n, u32 *old_head,
++				      u32 *new_head)
++{
++	u32 entries, max = n;
++	int success;
++
++	struct xdp_ring *ring = (struct xdp_ring *)q->ring;
++
++	do {
++		n = max;
++
++		*old_head = smp_load_acquire(&ring->consumer_head);
++
++		/* The subtraction is done between two unsigned 32bits value.
++		 * So 'free_entries' is always between and capacity (which is < size).
++		 */
++		entries = READ_ONCE(ring->producer) - *old_head;
++		if (n > entries)
++			n = entries;
++
++		if (unlikely(n == 0))
++			return 0;
++
++		*new_head = *old_head + n;
++		success = (cmpxchg(&ring->consumer_head, *old_head, *new_head) == *old_head);
++	} while (unlikely(success == 0));
++
++	return n;
++}
++
++static inline void xskq_update_prod_tail(struct xdp_ring *ring, u32 old_val, u32 new_val)
++{
++	while (READ_ONCE(ring->producer) != old_val)
++		cpu_relax();
++
++	smp_store_release(&ring->producer, new_val);
++}
++
++static inline void xskq_update_cons_tail(struct xdp_ring *ring, u32 old_val, u32 new_val)
++{
++	while (READ_ONCE(ring->consumer) != old_val)
++		cpu_relax();
++
++	smp_store_release(&ring->consumer, new_val);
++}
++
++/* Used by driver to find available entries during batching */
++static inline u32 xskq_cons_available_entries(struct xsk_queue *q, u32 max)
++{
++	struct xdp_ring *ring = (struct xdp_ring *)q->ring;
++	u32 entries = READ_ONCE(ring->producer) - READ_ONCE(ring->consumer_head);
++
++	return entries >= max ? max : entries;
++}
++
++/* Can be used by kernel to dequeue an addr from fq/cq ring.
++ * The batched variant for the same is present in xsk_buff_pool.c
++ * used for dequing from fq - `xp_alloc_new_from_fq()`
++ */
++static inline bool xskq_dequeue_addr(struct xsk_queue *q, u64 *addr)
++{
++	u32 cons_head, cons_next, idx, n;
++	struct xdp_umem_ring *ring = (struct xdp_umem_ring *)q->ring;
++
++	n = xskq_move_cons_head(q, 1, &cons_head, &cons_next);
++
++	/* Ring empty */
++	if (n == 0)
++		return false;
++
++	/* A, matches D */
++	idx = cons_head & q->ring_mask;
++	*addr = ring->desc[idx];
++
++	xskq_update_cons_tail((struct xdp_ring *)ring, cons_head, cons_next);
++
++	return true;
++}
++
++/* Can be used by kernel to bulk enqueue descs to rx ring */
++static inline u32 xskq_bulk_enqueue_descs(struct xsk_queue *q, struct list_head *rx_list,
++					  u32 rx_list_cnt)
++{
++	u32 prod_head, prod_next, idx, n;
++	struct xdp_desc desc;
++	struct xdp_buff_xsk *xskb;
++
++	struct xdp_rxtx_ring *ring = (struct xdp_rxtx_ring *)q->ring;
++
++	n = xskq_move_prod_head(q, rx_list_cnt, &prod_head, &prod_next);
++
++	/* Ring full */
++	if (n == 0)
++		return 0;
++
++	idx = prod_head & q->ring_mask;
++
++	for (u32 i = 0; i < n; i++) {
++		xskb = list_first_entry(rx_list, struct xdp_buff_xsk, list_node);
++		list_del_init(&xskb->list_node);
++
++		desc.addr = xp_get_handle(xskb, xskb->pool);
++		desc.len = xskb->len;
++		desc.options = xskb->flags;
++
++		ring->desc[idx] = desc;
++		idx = ((idx + 1) & q->ring_mask);
++
++		xp_release(xskb);
++	}
++
++	xskq_update_prod_tail((struct xdp_ring *)ring, prod_head, prod_next);
++
++	return n;
++}
++
+ struct xsk_queue *xskq_create(u32 nentries, bool umem_queue);
+ void xskq_destroy(struct xsk_queue *q_ops);

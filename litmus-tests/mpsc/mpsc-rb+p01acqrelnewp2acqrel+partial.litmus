@@ -1,0 +1,113 @@
+C mpsc-rb+p01acqrelnewp2acqrel+partial
+
+// Multi-producer, single-consumer two entry ring (modulo 4):
+// 	 prod_head prod cons       allowed action         prod_head prod cons
+//           0    0    0 =>      stage prod 	  =>          1    0    0   (P0/P1 reserves)
+//           1    0    0 =>      stage prod   	  =>          2    0    0   (P1/P0 reserves)
+//           2    0    0 =>      commit prod 	  =>          2    1    0   (P0/1 commits)
+//           2    1    0 =>        prod		      =>          2    2    0   (P1/0 commits. RING FULL)
+//           2    2    0 =>        cons           =>          2    2    1   (P2 consumes P0/1's data)
+//           2    2    1 =>      allow prod 	  =>          3    2    1   (P0/1 reserves next)
+//           3    2    1 =>        cons           =>          3    2    2   (P2 consumes P1/0's data)
+//           3    2    2 =>        prod 	      =>          3    3    2   (P0/1 commits)
+//           3    3    2 =>      allow prod 	  =>          0    3    2   (P1/0 reserves. PH WRAPS to 0)
+//           0    3    2 =>        prod 	      =>          0    0    2   (P1/0 commits. P WRAPS to 0)
+//           0    0    2 =>        cons           =>          0    0    3   (P2 consumes P0/1's 2nd data)
+//           0    0    3 =>        cons           =>          0    0    0   (P2 consumes P1/0's 2nd data. C WRAPS. EMPTY)
+//           2    1    0 =>        cons		      =>          2    1    1   (P2 consumes P0/1's data)
+// Many more states are possible...
+
+// New acqrel in kernel and the old acqrel algorithm in userspace.
+// There are two producers P0 and P1 in kernel, and one consumer P2 in userspace.
+// We start when the ring is partially full: prod_head==1, prod==1, cons==0, data0==99, data1==0.
+// Producers try to write 10 (P0) and 20 (P1) to the data slots. One producer shouldn't be
+// allowed to write until consumer consumes the initial data i.e. data0==99. 
+// Then both the producer can write. That means consumer will initially get 99 and then
+// 10 or 20. Can we enter a state where the consumer sees new data (10 or 20) insted of
+// the initial data.
+
+{
+    int prod_head = 1;
+    int prod = 1;
+    int cons = 0;
+    int data0 = 99;
+    int data1 = 0; 
+}
+
+P0(int *prod_head, int *prod, int *cons, int *data0, int *data1)
+{
+	int capacity = 2;
+	int r_cmp;
+	int ph;
+	int c;
+
+	ph = smp_load_acquire(prod_head);
+
+	c = READ_ONCE(*cons);
+	if ((ph - c) < capacity) {
+		r_cmp = cmpxchg(prod_head, ph, (ph + 1) );
+		if (r_cmp == ph) {
+			if ((ph & 1) == 0) WRITE_ONCE(*data0, 10);
+			if ((ph & 1) == 1) WRITE_ONCE(*data1, 10);
+		
+			if (READ_ONCE(*prod) == ph) {
+				smp_store_release(prod, (ph + 1));
+			}
+		}
+	}
+}
+
+P1(int *prod_head, int *prod, int *cons, int *data0, int *data1)
+{
+	int capacity = 2;
+	int r_cmp;
+	int ph;
+	int c;
+
+	ph = READ_ONCE(*prod_head);
+
+	c = READ_ONCE(*cons);
+	if ((ph - c) < capacity) {
+		r_cmp = cmpxchg(prod_head, ph, (ph + 1));
+		if (r_cmp == ph) {
+			if ((ph & 1) == 0) WRITE_ONCE(*data0, 20);
+			if ((ph & 1) == 1) WRITE_ONCE(*data1, 20);
+		
+			if (READ_ONCE(*prod) == ph) {
+				smp_store_release(prod, (ph + 1));
+			}
+		}
+	}
+}
+
+P2(int *prod, int *cons, int *data0, int *data1)
+{
+	int d0 = -1;
+	int d1 = -1;
+	int c0;
+	int c1;
+	int p0;
+	int p1;
+
+	c0 = READ_ONCE(*cons);
+	p0 = smp_load_acquire(prod);
+
+	if (p0 != c0) {
+		if ((c0 & 1) == 0) d0 = READ_ONCE(*data0);
+        if ((c0 & 1) == 1) d0 = READ_ONCE(*data1);
+		smp_store_release(cons, (c0 + 1) );
+
+		c1 = READ_ONCE(*cons);
+		p1 = smp_load_acquire(prod);
+
+		if (p1 != c1) {
+			if ((c1 & 1) == 0) d1 = READ_ONCE(*data0);
+			if ((c1 & 1) == 1) d1 = READ_ONCE(*data1);
+			smp_store_release(cons, (c1 + 1));
+		}
+	}
+}
+
+exists (
+	(cons=1 /\ (2:d0=10 \/ 2:d0=20))
+);

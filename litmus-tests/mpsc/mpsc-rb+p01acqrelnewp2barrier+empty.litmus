@@ -1,0 +1,111 @@
+C mpsc-rb+p01acqrelnewp2barrier+empty
+
+// Multi-producer, single-consumer two entry ring:
+// 	 prod_head prod cons       allowed action         prod_head prod cons
+//           0    0    0 =>      stage prod 	  =>          1    0    0   (P0/P1 reserves)
+//           1    0    0 =>      stage prod   	  =>          2    0    0   (P1/P0 reserves)
+//           2    0    0 =>      commit prod 	  =>          2    1    0   (P0/1 commits)
+//           2    1    0 =>        prod		      =>          2    2    0   (P1/0 commits. RING FULL)
+//           2    2    0 =>        cons           =>          2    2    1   (P2 consumes P0/1's data)
+//           2    2    1 =>      allow prod 	  =>          3    2    1   (P0/1 reserves next)
+//           3    2    1 =>        cons           =>          3    2    2   (P2 consumes P1/0's data)
+//           3    2    2 =>        prod 	      =>          3    3    2   (P0/1 commits)
+//           3    3    2 =>      allow prod 	  =>          0    3    2   (P1/0 reserves. PH WRAPS to 0)
+//           0    3    2 =>        prod 	      =>          0    0    2   (P1/0 commits. P WRAPS to 0)
+//           0    0    2 =>        cons           =>          0    0    3   (P2 consumes P0/1's 2nd data)
+//           0    0    3 =>        cons           =>          0    0    0   (P2 consumes P1/0's 2nd data. C WRAPS. EMPTY)
+//           2    1    0 =>        cons		      =>          2    1    1   (P2 consumes P0/1's data)
+// Many more states are possible...
+
+// New acqrel in kernel and the barrier algorithm in userspace.
+// We start at prod_head==0, prod==0, cons==0, data0==0, data1==0.
+// Producers write 10 (P0) and 20 (P1) to the data slots. Consumer should read 10 or 20
+// depending on which producer commits first. And then consumer can read the other value.
+// Can we enter a state where the consumer sees updated producer indices,
+// but observes the incorrect initial value of 0 for the data? Moreover, can the 
+// there be a state where ordering of producers is observed incorrectly?
+
+{}
+
+P0(int *prod_head, int *prod, int *cons, int *data0, int *data1)
+{
+	int capacity = 2;
+	int r_cmp;
+	int ph;
+	int c;
+
+	ph = smp_load_acquire(prod_head);
+
+	c = READ_ONCE(*cons);
+	if ((ph - c) < capacity) {
+		r_cmp = cmpxchg(prod_head, ph, (ph + 1));
+		if (r_cmp == ph) {
+			if ((ph & 1) == 0) WRITE_ONCE(*data0, 10);
+			if ((ph & 1) == 1) WRITE_ONCE(*data1, 10);
+		
+			if (READ_ONCE(*prod) == ph) {
+				smp_store_release(prod, (ph + 1));
+			}
+		}
+	}
+}
+
+P1(int *prod_head, int *prod, int *cons, int *data0, int *data1)
+{
+	int capacity = 2;
+	int r_cmp;
+	int ph;
+	int c;
+
+	ph = READ_ONCE(*prod_head);
+
+	c = READ_ONCE(*cons);
+	if ((ph - c) < capacity) {
+		r_cmp = cmpxchg(prod_head, ph, (ph + 1));
+		if (r_cmp == ph) {
+			if ((ph & 1) == 0) WRITE_ONCE(*data0, 20);
+			if ((ph & 1) == 1) WRITE_ONCE(*data1, 20);
+		
+			if (READ_ONCE(*prod) == ph) {
+				smp_store_release(prod, (ph + 1));
+			}
+		}
+	}
+}
+
+P2(int *prod, int *cons, int *data0, int *data1)
+{
+	int d0 = -1;
+	int d1 = -1;
+	int c0;
+	int c1;
+	int p0;
+	int p1;
+
+	c0 = READ_ONCE(*cons);
+	p0 = READ_ONCE(*prod)
+	if (p0 != c0) {
+		smp_rmb();
+		if ((c0 & 1) == 0) d0 = READ_ONCE(*data0);
+        if ((c0 & 1) == 1) d0 = READ_ONCE(*data1);
+		smp_mb();
+		WRITE_ONCE(*cons, (c0 + 1));
+
+		c1 = READ_ONCE(*cons);
+		p1 = READ_ONCE(*prod)
+		if (p1 != c1) {
+			smp_rmb();
+			if ((c1 & 1) == 0) d1 = READ_ONCE(*data0);
+			if ((c1 & 1) == 1) d1 = READ_ONCE(*data1);
+			smp_mb();
+			WRITE_ONCE(*cons, (c1 + 1));
+		}
+	}
+}
+
+exists (
+	((2:d0=0 \/ 2:d1=0) /\ cons=1 ) \/
+	((2:d0=0 \/ 2:d1=0) /\ cons=2) \/
+	(prod_head=2 /\ cons=2 /\ 2:d0=10 /\ 2:d1=10) \/
+	(prod_head=2 /\ cons=2 /\ 2:d0=20 /\ 2:d1=20)
+);
