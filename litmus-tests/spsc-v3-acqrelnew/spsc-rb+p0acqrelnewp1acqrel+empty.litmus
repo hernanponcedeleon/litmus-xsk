@@ -26,7 +26,7 @@ P0(int *prod_head, int *prod, int *cons, int *data0)
 	int ph;
 	int c;
 
-	ph = smp_load_acquire(prod_head);
+	ph = READ_ONCE(*prod_head);
 
 	c = READ_ONCE(*cons);
 	if ((ph - c) < capacity) {

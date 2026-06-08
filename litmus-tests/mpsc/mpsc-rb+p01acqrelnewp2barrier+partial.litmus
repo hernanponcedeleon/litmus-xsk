@@ -41,7 +41,7 @@ P0(int *prod_head, int *prod, int *cons, int *data0, int *data1)
 	int ph;
 	int c;
 
-	ph = smp_load_acquire(prod_head);
+	ph = READ_ONCE(*prod_head);
 
 	c = READ_ONCE(*cons);
 	if ((ph - c) < capacity) {
@@ -90,7 +90,7 @@ P2(int *prod, int *cons, int *data0, int *data1)
 	int p1;
 
 	c0 = READ_ONCE(*cons);
-	p0 = READ_ONCE(*prod)
+	p0 = READ_ONCE(*prod);
 	if (p0 != c0) {
 		smp_rmb();
 		if ((c0 & 1) == 0) d0 = READ_ONCE(*data0);
@@ -99,7 +99,7 @@ P2(int *prod, int *cons, int *data0, int *data1)
 		WRITE_ONCE(*cons, (c0 + 1));
 
 		c1 = READ_ONCE(*cons);
-		p1 = READ_ONCE(*prod)
+		p1 = READ_ONCE(*prod);
 		if (p1 != c1) {
 			smp_rmb();
 			if ((c1 & 1) == 0) d1 = READ_ONCE(*data0);

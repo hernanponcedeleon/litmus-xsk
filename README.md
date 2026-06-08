@@ -14,7 +14,7 @@ Further updating the ring buffer to support multiple producers or consumers allo
 
 The repository is organized by ring buffer implementation versions::
 - `litmus-tests/spsc-v1-barrier/`: Tests for the old version of the ring buffer implementation that used general smp_{r,w,}mb() barriers.
-- `litmus-tests/spsc-v2-acqrelnew/`: Tests for the current version that uses load-acquire/store-release barriers.
+- `litmus-tests/spsc-v2-acqrel/`: Tests for the current version that uses load-acquire/store-release barriers.
 - `litmus-tests/spsc-v3-acqrelnew/`: Tests for the new MPSC-capable version using load-acquire/store-release barriers, but evaluated under single producer/consumer conditions.
 - `litmus-tests/mpsc/`: Tests for the new MPSC version evaluating multiple producers in the kernel.
 
