@@ -27,7 +27,7 @@ void *consumer_thread(void *arg) {
 
     // Simplified for one entry, for multiple entries we would need to loop 
     bool r = xskq_cons_peek_addr_unchecked(q, &addr);
-    // Assume the ring is not empty, i.e., the producer thread already run
+    // Assume the ring is not empty, i.e., the producer thread already ran
     __VERIFIER_assume(r);
 
     // Should not read stale data

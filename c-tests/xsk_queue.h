@@ -56,12 +56,14 @@ static inline bool xskq_cons_read_addr_unchecked(struct xsk_queue *q, u64 *addr)
 static inline void __xskq_cons_release(struct xsk_queue *q)
 {
 	smp_store_release(&q->ring->consumer, q->cached_cons); /* D, matches A */
+	// WRITE_ONCE(q->ring->consumer, q->cached_cons); // TODO
 }
 
 static inline void __xskq_cons_peek(struct xsk_queue *q)
 {
 	/* Refresh the local pointer */
 	q->cached_prod = smp_load_acquire(&q->ring->producer);  /* C, matches B */
+	// q->cached_prod = READ_ONCE(q->ring->producer); // Race in mp_kernel-sc_userspace
 }
 
 static inline void xskq_cons_get_entries(struct xsk_queue *q)
@@ -97,11 +99,13 @@ static inline u32 xskq_move_prod_head(struct xsk_queue *q, u32 n, u32 *old_head,
 		n = max;
 
 		*old_head = smp_load_acquire(&ring->producer_head);
+		// *old_head = READ_ONCE(ring->producer_head); // TODO
 
 		/* The subtraction is done between two unsigned 32bits value.
 		 * So 'free_entries' is always between and capacity (which is < size).
 		 */
 		free_entries = (capacity + READ_ONCE(ring->consumer) - *old_head);
+		// free_entries = (capacity + ring->consumer - *old_head); // Race in mp_kernel-sc_userspace
 		if (unlikely(n > free_entries))
 			n = free_entries;
 
@@ -110,6 +114,9 @@ static inline u32 xskq_move_prod_head(struct xsk_queue *q, u32 n, u32 *old_head,
 
 		*new_head = *old_head + n;
 		success = (cmpxchg(&ring->producer_head, *old_head, *new_head) == *old_head);
+		// success = (cmpxchg_release(&ring->producer_head, *old_head, *new_head) == *old_head); // TODO
+		// success = (cmpxchg_acquire(&ring->producer_head, *old_head, *new_head) == *old_head); // TODO
+		// success = (cmpxchg_relaxed(&ring->producer_head, *old_head, *new_head) == *old_head); // TODO
 	} while (unlikely(success == 0));
 
 	return n;
@@ -118,9 +125,11 @@ static inline u32 xskq_move_prod_head(struct xsk_queue *q, u32 n, u32 *old_head,
 static inline void xskq_update_prod_tail(struct xdp_ring *ring, u32 old_val, u32 new_val)
 {
 	while (READ_ONCE(ring->producer) != old_val)
+	// while (ring->producer != old_val) // Race in mp_kernel-sc_userspace-loop
 		cpu_relax();
 
 	smp_store_release(&ring->producer, new_val);
+	// WRITE_ONCE(ring->producer, new_val); // Race in sp_kernel-sc_userspace
 }
 
 /* Can be used by kernel to bulk enqueue descs to rx ring */

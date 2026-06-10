@@ -26,15 +26,21 @@ void *consumer_thread(void *arg) {
     struct xsk_queue *q = (struct xsk_queue *)arg;
     u64 addr;
 
-    // Simplified for one entry, for multiple entries we would need to loop 
-    bool r = xskq_cons_peek_addr_unchecked(q, &addr);
-    // Assume the ring is not empty, i.e., the producer thread already ran
-    __VERIFIER_assume(r);
+    for(int i = 0; i < 3; i++) {
+        bool r = xskq_cons_peek_addr_unchecked(q, &addr);
+        if(i < 2) {
+            // Assume the ring is not empty, i.e., the producer thread already ran
+            __VERIFIER_assume(r);
+        } else {
+            // We enqueue two elements, thus the 3rd dequeue must fail
+            assert(!r);
+        }
 
-    // Should not read stale data
-    assert(addr != 0);
+        // Should not read stale data
+        assert(addr != 0);
 
-    xskq_cons_release(q);
+        xskq_cons_release(q);
+    }
 
     return NULL;
 }
