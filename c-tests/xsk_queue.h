@@ -105,6 +105,7 @@ static inline u32 xskq_move_prod_head(struct xsk_queue *q, u32 n, u32 *old_head,
 		 * So 'free_entries' is always between and capacity (which is < size).
 		 */
 		free_entries = (capacity + READ_ONCE(ring->consumer) - *old_head);
+		assert(free_entries <= capacity);
 		// free_entries = (capacity + ring->consumer - *old_head); // Race in mp_kernel-sc_userspace
 		if (unlikely(n > free_entries))
 			n = free_entries;
