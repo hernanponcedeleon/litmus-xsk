@@ -15,38 +15,46 @@ static size_t xskq_get_ring_size(struct xsk_queue *q, bool umem_queue)
     return base_size + (q->nentries * element_size);
 }
 
-// Identical to kernel
+// Almost as in the kernel (modulo init q->ring)
 struct xsk_queue *xskq_create(u32 nentries, bool umem_queue)
 {
-	struct xsk_queue *q;
-	size_t size;
+    struct xsk_queue *q;
+    size_t size;
 
-	q = kzalloc_obj(*q);
-	if (!q)
-		return NULL;
+    q = kzalloc_obj(*q);
+    if (!q)
+        return NULL;
 
-	q->nentries = nentries;
-	q->ring_mask = nentries - 1;
+    q->nentries = nentries;
+    q->ring_mask = nentries - 1;
 
-	size = xskq_get_ring_size(q, umem_queue);
+    size = xskq_get_ring_size(q, umem_queue);
 
-	/* size which is overflowing or close to SIZE_MAX will become 0 in
-	 * PAGE_ALIGN(), checking SIZE_MAX is enough due to the previous
-	 * is_power_of_2(), the rest will be handled by vmalloc_user()
-	 */
-	if (unlikely(size == SIZE_MAX)) {
-		kfree(q);
-		return NULL;
-	}
+    /* size which is overflowing or close to SIZE_MAX will become 0 in
+     * PAGE_ALIGN(), checking SIZE_MAX is enough due to the previous
+     * is_power_of_2(), the rest will be handled by vmalloc_user()
+     */
+    if (unlikely(size == SIZE_MAX)) {
+        kfree(q);
+        return NULL;
+    }
 
-	size = PAGE_ALIGN(size);
+    size = PAGE_ALIGN(size);
 
-	q->ring = vmalloc_user(size);
-	if (!q->ring) {
-		kfree(q);
-		return NULL;
-	}
+    q->ring = vmalloc_user(size); // implemented as malloc in defs.h
+    // start diff from kernel
+    q->ring->producer = 0;
+    q->ring->consumer = 0;
+    q->ring->flags = 0;
+    WRITE_ONCE(q->ring->producer_head, 0); // ONCE to avoid Flag mixed-accesses
+    WRITE_ONCE(q->ring->consumer_head, 0);
+    // end diff from kernel
 
-	q->ring_vmalloc_size = size;
-	return q;
+    if (!q->ring) {
+        kfree(q);
+        return NULL;
+    }
+
+    q->ring_vmalloc_size = size;
+    return q;
 }
